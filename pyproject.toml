@@ -1,8 +1,13 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "crisisflow"
-version = "1.0.0"
-description = "Real-world disaster response simulation."
+version = "0.1.0"
+description = "CrisisFlow RL Environment"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "openenv>=0.2.0"
+]
+
+[project.scripts]
+server = "app.main:app"
