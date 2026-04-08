@@ -1,88 +1,74 @@
-import os
-import json
 import requests
 import time
+import json
 from datetime import datetime
 
+BASE_URL = "http://localhost:7860"
 
-API_BASE = os.getenv("API_BASE_URL", "http://localhost:7860")
+
+def wait_for_server():
+    print("[INFO] Waiting for server...")
+    for _ in range(30):
+        try:
+            r = requests.get(f"{BASE_URL}/health", timeout=2)
+            if r.status_code == 200:
+                print("[INFO] Server is ready")
+                return
+        except:
+            pass
+        time.sleep(1)
+    print("[ERROR] Server not responding, continuing anyway")
 
 
 def safe_post(url, payload):
-    try:
-        res = requests.post(url, json=payload, timeout=5)
-        return res.json()
-    except Exception as e:
-        print(f"[ERROR] Request failed: {e}")
-        return None
+    for _ in range(3):
+        try:
+            r = requests.post(url, json=payload, timeout=5)
+            return r.json()
+        except Exception as e:
+            print(f"[WARN] Retry request: {e}")
+            time.sleep(1)
+    return None
 
 
-def log_start(task):
-    print(json.dumps({
-        "type": "START",
-        "task": task,
-        "env": "CrisisFlow",
-        "model": "rule-based",
-        "timestamp": datetime.utcnow().isoformat()
-    }), flush=True)
-
-
-def log_step(step, action, reward, done, error=None):
-    print(json.dumps({
-        "type": "STEP",
-        "step": step,
-        "action": action,
-        "reward": round(reward, 4),
-        "done": done,
-        "error": error
-    }), flush=True)
-
-
-def log_end(success, steps, score, rewards):
-    print(json.dumps({
-        "type": "END",
-        "success": success,
-        "steps": steps,
-        "score": round(score, 4),
-        "rewards": [round(r, 4) for r in rewards],
-        "mean_reward": round(sum(rewards)/len(rewards) if rewards else 0.0, 4)
-    }), flush=True)
-
-
-def get_safe_action():
-    return {
-        "action_type": "wait",
-        "zone_id": None,
-        "resource_type": None,
-        "resource_amount": None,
-        "priority": None
-    }
+def log(obj):
+    print(json.dumps(obj), flush=True)
 
 
 def run_task(task_id, max_steps):
-    log_start(task_id)
+    log({
+        "type": "START",
+        "task": task_id,
+        "env": "CrisisFlow",
+        "model": "safe-agent",
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
-    reset = safe_post(f"{API_BASE}/reset", {"task_id": task_id})
+    reset = safe_post(f"{BASE_URL}/reset", {"task_id": task_id})
     if not reset:
-        log_end(False, 0, 0.0, [])
+        log({"type": "END", "success": False, "steps": 0, "score": 0.0, "rewards": []})
         return
 
     session_id = reset.get("session_id")
-    observation = reset.get("observation")
-
     if not session_id:
-        log_end(False, 0, 0.0, [])
+        log({"type": "END", "success": False, "steps": 0, "score": 0.0, "rewards": []})
         return
 
     rewards = []
     done = False
-    step_count = 0
+    step = 0
 
-    while not done and step_count < max_steps:
-        action = get_safe_action()
+    while not done and step < max_steps:
+        action = {
+            "action_type": "wait",
+            "zone_id": None,
+            "resource_type": None,
+            "resource_amount": None,
+            "priority": None
+        }
 
         result = safe_post(
-            f"{API_BASE}/step",
+            f"{BASE_URL}/step",
             {
                 "session_id": session_id,
                 "action": action
@@ -90,32 +76,48 @@ def run_task(task_id, max_steps):
         )
 
         if not result:
-            log_step(step_count + 1, action, 0.0, True, "request_failed")
+            log({
+                "type": "STEP",
+                "step": step + 1,
+                "action": action,
+                "reward": 0.0,
+                "done": True,
+                "error": "request_failed"
+            })
             break
 
         reward = result.get("reward", {}).get("score", 0.0)
         done = result.get("done", True)
-        observation = result.get("observation", {})
 
         rewards.append(reward)
-        step_count += 1
+        step += 1
 
-        log_step(step_count, action, reward, done)
+        log({
+            "type": "STEP",
+            "step": step,
+            "action": action,
+            "reward": reward,
+            "done": done,
+            "error": None
+        })
 
         time.sleep(0.2)
 
     score = sum(rewards)/len(rewards) if rewards else 0.0
 
-    log_end(
-        success=True,
-        steps=step_count,
-        score=score,
-        rewards=rewards
-    )
+    log({
+        "type": "END",
+        "success": True,
+        "steps": step,
+        "score": score,
+        "rewards": rewards
+    })
 
 
 def main():
     try:
+        wait_for_server()
+
         tasks = {
             "alert_identification": 5,
             "resource_prioritization": 8,
@@ -125,7 +127,7 @@ def main():
         for task, steps in tasks.items():
             run_task(task, steps)
 
-        print("[INFO] Inference completed successfully")
+        print("[INFO] Inference completed")
 
     except Exception as e:
         print(f"[FATAL] {e}")
