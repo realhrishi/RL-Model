@@ -1,5 +1,7 @@
 import requests
 import time
+import os
+import json
 
 BASE_URL = "http://localhost:7860"
 
@@ -31,6 +33,34 @@ def safe_post(url, payload):
     return None
 
 
+def call_llm(prompt):
+    try:
+        response = requests.post(
+            f"{os.environ.get('API_BASE_URL')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {os.environ.get('API_KEY')}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ]
+            },
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        else:
+            print(f"[WARN] LLM bad response: {response.status_code}")
+            return None
+
+    except Exception as e:
+        print(f"[WARN] LLM call failed: {e}")
+        return None
+
+
 def run_task(task_id, max_steps):
     print(f"[START] task={task_id}", flush=True)
 
@@ -49,13 +79,36 @@ def run_task(task_id, max_steps):
     step = 0
 
     while not done and step < max_steps:
-        action = {
-            "action_type": "wait",
-            "zone_id": None,
-            "resource_type": None,
-            "resource_amount": None,
-            "priority": None
-        }
+
+        prompt = f"""
+You are managing a crisis response system.
+Decide the best action for task: {task_id}.
+
+Respond ONLY in JSON:
+{{
+  "action_type": "wait",
+  "zone_id": null,
+  "resource_type": null,
+  "resource_amount": null,
+  "priority": null
+}}
+"""
+
+        llm_output = call_llm(prompt)
+
+        try:
+            action = json.loads(llm_output) if llm_output else {}
+        except:
+            action = {}
+
+        if not action:
+            action = {
+                "action_type": "wait",
+                "zone_id": None,
+                "resource_type": None,
+                "resource_amount": None,
+                "priority": None
+            }
 
         result = safe_post(
             f"{BASE_URL}/step",
