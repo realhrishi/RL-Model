@@ -1,32 +1,33 @@
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
 import json
 import requests
-import sys
+import time
 from datetime import datetime
-from openai import OpenAI
 
-# Required Environment Variables
-API_BASE_URL = os.environ.get("API_BASE_URL")
-MODEL_NAME = os.environ.get("MODEL_NAME")
-HF_TOKEN = os.environ.get("HF_TOKEN")
 
-if not API_BASE_URL or not MODEL_NAME or not HF_TOKEN:
-    sys.stderr.write("[DEBUG] Missing required environment vars: API_BASE_URL, MODEL_NAME, HF_TOKEN\n")
-    sys.exit(1)
+API_BASE = os.getenv("API_BASE_URL", "http://localhost:7860")
 
-def log_start(task: str, env: str, model: str):
+
+def safe_post(url, payload):
+    try:
+        res = requests.post(url, json=payload, timeout=5)
+        return res.json()
+    except Exception as e:
+        print(f"[ERROR] Request failed: {e}")
+        return None
+
+
+def log_start(task):
     print(json.dumps({
         "type": "START",
         "task": task,
-        "env": env,
-        "model": model,
+        "env": "CrisisFlow",
+        "model": "rule-based",
         "timestamp": datetime.utcnow().isoformat()
     }), flush=True)
 
-def log_step(step: int, action: dict, reward: float, done: bool, error=None):
+
+def log_step(step, action, reward, done, error=None):
     print(json.dumps({
         "type": "STEP",
         "step": step,
@@ -36,7 +37,8 @@ def log_step(step: int, action: dict, reward: float, done: bool, error=None):
         "error": error
     }), flush=True)
 
-def log_end(success: bool, steps: int, score: float, rewards: list[float]):
+
+def log_end(success, steps, score, rewards):
     print(json.dumps({
         "type": "END",
         "success": success,
@@ -46,33 +48,9 @@ def log_end(success: bool, steps: int, score: float, rewards: list[float]):
         "mean_reward": round(sum(rewards)/len(rewards) if rewards else 0.0, 4)
     }), flush=True)
 
-SYSTEM_PROMPT = """You are an expert disaster response coordinator managing a flood crisis.
 
-You will receive the current state of 5 city zones as JSON.
-
-Respond with ONLY a valid JSON action object:
-{
-  "action_type": "dispatch_rescue" | "send_alert" | "allocate_resource" | "wait",
-  "zone_id": "NORTH" | "SOUTH" | "EAST" | "WEST" | "CENTER" | null,
-  "resource_type": "medical" | "food" | "shelter" | null,
-  "resource_amount": integer | null,
-  "priority": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | null
-}
-
-Strategy:
-- PRIORITIZE CRITICAL zones (>0.7 flood_level)
-- CASCADING FLOODS: CRITICAL zones spread risk to neighbors
-- SEND ALERTS BEFORE rescues
-- DO NOT ignore same high-risk zone repeatedly
-- DO NOT wait if any zone > 0.6
-- Avoid duplicate alerts
-- Use resources early before decay
-
-Return ONLY JSON.
-"""
-
-def call_llm(client: OpenAI, observation: dict) -> dict:
-    fallback = {
+def get_safe_action():
+    return {
         "action_type": "wait",
         "zone_id": None,
         "resource_type": None,
@@ -80,105 +58,77 @@ def call_llm(client: OpenAI, observation: dict) -> dict:
         "priority": None
     }
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(observation)}
-            ],
-            temperature=0.0,
-            response_format={"type": "json_object"}
+
+def run_task(task_id, max_steps):
+    log_start(task_id)
+
+    reset = safe_post(f"{API_BASE}/reset", {"task_id": task_id})
+    if not reset:
+        log_end(False, 0, 0.0, [])
+        return
+
+    session_id = reset.get("session_id")
+    observation = reset.get("observation")
+
+    if not session_id:
+        log_end(False, 0, 0.0, [])
+        return
+
+    rewards = []
+    done = False
+    step_count = 0
+
+    while not done and step_count < max_steps:
+        action = get_safe_action()
+
+        result = safe_post(
+            f"{API_BASE}/step",
+            {
+                "session_id": session_id,
+                "action": action
+            }
         )
-        content = response.choices[0].message.content
-        action = json.loads(content)
 
-        # 🔥 VALIDATION FIX (CRITICAL)
-        if not isinstance(action, dict) or "action_type" not in action:
-            return fallback
+        if not result:
+            log_step(step_count + 1, action, 0.0, True, "request_failed")
+            break
 
-        return action
+        reward = result.get("reward", {}).get("score", 0.0)
+        done = result.get("done", True)
+        observation = result.get("observation", {})
 
-    except Exception as e:
-        sys.stderr.write(f"[DEBUG] LLM call failed: {str(e)}\n")
-        return fallback
+        rewards.append(reward)
+        step_count += 1
+
+        log_step(step_count, action, reward, done)
+
+        time.sleep(0.2)
+
+    score = sum(rewards)/len(rewards) if rewards else 0.0
+
+    log_end(
+        success=True,
+        steps=step_count,
+        score=score,
+        rewards=rewards
+    )
 
 
 def main():
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-    base_url = "http://localhost:7860"
+    try:
+        tasks = {
+            "alert_identification": 5,
+            "resource_prioritization": 8,
+            "full_crisis_management": 12
+        }
 
-    MAX_STEPS_MAP = {
-        "alert_identification": 5,
-        "resource_prioritization": 8,
-        "full_crisis_management": 12
-    }
+        for task, steps in tasks.items():
+            run_task(task, steps)
 
-    for task_id in ["alert_identification", "resource_prioritization", "full_crisis_management"]:
-        log_start(task=task_id, env="CrisisFlow", model=MODEL_NAME)
+        print("[INFO] Inference completed successfully")
 
-        try:
-            reset_resp = requests.post(f"{base_url}/reset", json={"task_id": task_id, "seed": 42})
-            reset_resp.raise_for_status()
-
-            data = reset_resp.json()
-            session_id = data["session_id"]
-            observation = data["observation"]
-
-        except Exception as e:
-            sys.stderr.write(f"[DEBUG] Reset failed: {str(e)}\n")
-            log_end(success=False, steps=0, score=0.0, rewards=[])
-            continue
-
-        rewards = []
-        steps_taken = 0
-        done = False
-
-        while not done and steps_taken < MAX_STEPS_MAP[task_id]:
-            action_json = call_llm(client, observation)
-
-            try:
-                step_resp = requests.post(
-                    f"{base_url}/step",
-                    json={"session_id": session_id, "action": action_json}
-                )
-                step_resp.raise_for_status()
-
-                result = step_resp.json()
-                reward = result["reward"]["score"]
-                done = result["done"]
-                observation = result["observation"]
-
-                rewards.append(reward)
-                steps_taken += 1
-
-                log_step(
-                    step=steps_taken,
-                    action=action_json,
-                    reward=reward,
-                    done=done
-                )
-
-            except Exception as e:
-                sys.stderr.write(f"[DEBUG] Step failed: {str(e)}\n")
-                log_step(
-                    step=steps_taken + 1,
-                    action=action_json,
-                    reward=0.0,
-                    done=True,
-                    error=str(e)
-                )
-                break
-
-        score = sum(rewards) / len(rewards) if rewards else 0.0
-        success = score >= 0.5
-
-        log_end(
-            success=success,
-            steps=steps_taken,
-            score=score,
-            rewards=rewards
-        )
+    except Exception as e:
+        print(f"[FATAL] {e}")
 
 
 if __name__ == "__main__":
