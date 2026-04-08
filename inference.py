@@ -17,13 +17,15 @@ def wait_for_server():
         except:
             pass
         time.sleep(1)
-    print("[ERROR] Server not responding, continuing anyway")
+    raise Exception("Server failed to start")
 
 
 def safe_post(url, payload):
     for _ in range(3):
         try:
             r = requests.post(url, json=payload, timeout=5)
+            if r.status_code != 200:
+                raise Exception(f"Bad status: {r.status_code}")
             return r.json()
         except Exception as e:
             print(f"[WARN] Retry request: {e}")
