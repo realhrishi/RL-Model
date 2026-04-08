@@ -1,7 +1,5 @@
 import requests
 import time
-import json
-from datetime import datetime
 
 BASE_URL = "http://localhost:7860"
 
@@ -33,27 +31,17 @@ def safe_post(url, payload):
     return None
 
 
-def log(obj):
-    print(json.dumps(obj), flush=True)
-
-
 def run_task(task_id, max_steps):
-    log({
-        "type": "START",
-        "task": task_id,
-        "env": "CrisisFlow",
-        "model": "safe-agent",
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    print(f"[START] task={task_id}", flush=True)
 
     reset = safe_post(f"{BASE_URL}/reset", {"task_id": task_id})
     if not reset:
-        log({"type": "END", "success": False, "steps": 0, "score": 0.0, "rewards": []})
+        print(f"[END] task={task_id} score=0.0 steps=0", flush=True)
         return
 
     session_id = reset.get("session_id")
     if not session_id:
-        log({"type": "END", "success": False, "steps": 0, "score": 0.0, "rewards": []})
+        print(f"[END] task={task_id} score=0.0 steps=0", flush=True)
         return
 
     rewards = []
@@ -78,14 +66,7 @@ def run_task(task_id, max_steps):
         )
 
         if not result:
-            log({
-                "type": "STEP",
-                "step": step + 1,
-                "action": action,
-                "reward": 0.0,
-                "done": True,
-                "error": "request_failed"
-            })
+            print(f"[STEP] step={step+1} reward=0.0", flush=True)
             break
 
         reward = result.get("reward", {}).get("score", 0.0)
@@ -94,26 +75,13 @@ def run_task(task_id, max_steps):
         rewards.append(reward)
         step += 1
 
-        log({
-            "type": "STEP",
-            "step": step,
-            "action": action,
-            "reward": reward,
-            "done": done,
-            "error": None
-        })
+        print(f"[STEP] step={step} reward={reward}", flush=True)
 
         time.sleep(0.2)
 
     score = sum(rewards)/len(rewards) if rewards else 0.0
 
-    log({
-        "type": "END",
-        "success": True,
-        "steps": step,
-        "score": score,
-        "rewards": rewards
-    })
+    print(f"[END] task={task_id} score={score} steps={step}", flush=True)
 
 
 def main():
